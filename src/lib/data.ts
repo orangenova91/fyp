@@ -65,7 +65,7 @@ export type Announcement = {
 
 type NewFile = Omit<FileRecord, "id" | "created_at" | "owner_id">;
 
-const userColumns = sql`id, name, email, role, project_title`;
+const userColumns = () => sql`id, name, email, role, project_title`;
 
 // Users
 
@@ -75,13 +75,13 @@ export async function countUsers(): Promise<number> {
 }
 
 export async function findUserById(id: number) {
-  const [user] = await sql<User[]>`SELECT ${userColumns} FROM users WHERE id = ${id}`;
+  const [user] = await sql<User[]>`SELECT ${userColumns()} FROM users WHERE id = ${id}`;
   return user;
 }
 
 export async function findUserWithPasswordByEmail(email: string) {
   const [user] = await sql<(User & { password_hash: string })[]>`
-    SELECT ${userColumns}, password_hash FROM users WHERE lower(email) = lower(${email})`;
+    SELECT ${userColumns()}, password_hash FROM users WHERE lower(email) = lower(${email})`;
   return user;
 }
 
@@ -92,7 +92,7 @@ export async function getPasswordHash(userId: number) {
 }
 
 export function listStudents() {
-  return sql<User[]>`SELECT ${userColumns} FROM users WHERE role = 'student' ORDER BY name`;
+  return sql<User[]>`SELECT ${userColumns()} FROM users WHERE role = 'student' ORDER BY name`;
 }
 
 export async function createUser(input: {

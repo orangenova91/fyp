@@ -20,7 +20,20 @@ function connect() {
   });
 }
 
-const globalForDb = globalThis as unknown as { capstoneSql?: ReturnType<typeof connect> };
+type Sql = ReturnType<typeof connect>;
 
-export const sql = globalForDb.capstoneSql ?? connect();
-if (process.env.NODE_ENV !== "production") globalForDb.capstoneSql = sql;
+const globalForDb = globalThis as unknown as { capstoneSql?: Sql };
+
+function getSql(): Sql {
+  if (!globalForDb.capstoneSql) globalForDb.capstoneSql = connect();
+  return globalForDb.capstoneSql;
+}
+
+// Connects on first use rather than at import, so `next build` works without database credentials.
+export const sql = new Proxy((() => {}) as unknown as Sql, {
+  apply: (_target, _thisArg, args) => Reflect.apply(getSql(), undefined, args),
+  get: (_target, property) => {
+    const value = Reflect.get(getSql(), property);
+    return typeof value === "function" ? value.bind(getSql()) : value;
+  },
+});

@@ -13,7 +13,7 @@ function connect() {
 
 const globalForSupabase = globalThis as unknown as { capstoneSupabase?: ReturnType<typeof connect> };
 
-const supabase = globalForSupabase.capstoneSupabase ?? connect();
-if (process.env.NODE_ENV !== "production") globalForSupabase.capstoneSupabase = supabase;
-
-export const storage = () => supabase.storage.from(STORAGE_BUCKET);
+export function storage() {
+  globalForSupabase.capstoneSupabase ??= connect();
+  return globalForSupabase.capstoneSupabase.storage.from(STORAGE_BUCKET);
+}
