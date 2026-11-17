@@ -1,4 +1,5 @@
 import "server-only";
+import { randomInt } from "node:crypto";
 import { sql } from "./db";
 
 export type Role = "professor" | "student";
@@ -11,8 +12,46 @@ export type User = {
   project_title: string | null;
 };
 
+export type ClassDetail = {
+  id: number;
+  professor_id: number;
+  professor_name: string;
+  name: string;
+  term: string;
+  description: string;
+  join_code: string;
+  created_at: string;
+};
+
+export type ProfessorClassCard = ClassDetail & { approved_count: number; pending_count: number };
+
+/** What students see in the class list. Deliberately excludes the join code. */
+export type StudentClassCard = {
+  id: number;
+  name: string;
+  term: string;
+  description: string;
+  professor_name: string;
+  approved_count: number;
+  my_status: EnrollmentStatus | null;
+};
+
+export type EnrollmentStatus = "pending" | "approved" | "rejected";
+
+export type Enrollment = {
+  class_id: number;
+  student_id: number;
+  status: EnrollmentStatus;
+  joined_via: "code" | "request";
+  requested_at: string;
+  decided_at: string | null;
+};
+
+export type Member = User & Omit<Enrollment, "class_id" | "student_id">;
+
 export type Assignment = {
   id: number;
+  class_id: number;
   title: string;
   description: string;
   due_at: string;
@@ -53,8 +92,6 @@ export type Comment = {
 
 export type ReviewStatus = "approved" | "revision_requested";
 
-export type Review = { status: ReviewStatus; updated_at: string };
-
 export type Announcement = {
   id: number;
   title: string;
@@ -68,11 +105,6 @@ type NewFile = Omit<FileRecord, "id" | "created_at" | "owner_id">;
 const userColumns = () => sql`id, name, email, role, project_title`;
 
 // Users
-
-export async function countUsers(): Promise<number> {
-  const [row] = await sql<{ n: number }[]>`SELECT count(*)::int AS n FROM users`;
-  return row.n;
-}
 
 export async function findUserById(id: number) {
   const [user] = await sql<User[]>`SELECT ${userColumns()} FROM users WHERE id = ${id}`;
@@ -91,10 +123,7 @@ export async function getPasswordHash(userId: number) {
   return row?.password_hash;
 }
 
-export function listStudents() {
-  return sql<User[]>`SELECT ${userColumns()} FROM users WHERE role = 'student' ORDER BY name`;
-}
-
+/** Returns null when the email is already registered. */
 export async function createUser(input: {
   name: string;
   email: string;
@@ -105,58 +134,223 @@ export async function createUser(input: {
   const [row] = await sql<{ id: number }[]>`
     INSERT INTO users (name, email, password_hash, role, project_title)
     VALUES (${input.name}, ${input.email}, ${input.passwordHash}, ${input.role}, ${input.projectTitle ?? null})
+    ON CONFLICT DO NOTHING
     RETURNING id`;
-  return row.id;
-}
-
-/** Creates the first account only if the database has no users yet. */
-export async function createFirstProfessor(input: { name: string; email: string; passwordHash: string }) {
-  return sql.begin(async (tx) => {
-    await tx`LOCK TABLE users IN EXCLUSIVE MODE`;
-    const [{ n }] = await tx<{ n: number }[]>`SELECT count(*)::int AS n FROM users`;
-    if (n > 0) return null;
-    const [row] = await tx<{ id: number }[]>`
-      INSERT INTO users (name, email, password_hash, role)
-      VALUES (${input.name}, ${input.email}, ${input.passwordHash}, 'professor')
-      RETURNING id`;
-    return row.id;
-  });
+  return row?.id ?? null;
 }
 
 export async function updatePasswordHash(userId: number, passwordHash: string) {
   await sql`UPDATE users SET password_hash = ${passwordHash} WHERE id = ${userId}`;
 }
 
-export async function updateStudentProfile(userId: number, name: string, projectTitle: string | null) {
-  await sql`
-    UPDATE users SET name = ${name}, project_title = ${projectTitle}
-    WHERE id = ${userId} AND role = 'student'`;
+export async function updateProfile(userId: number, name: string, projectTitle: string | null) {
+  await sql`UPDATE users SET name = ${name}, project_title = ${projectTitle} WHERE id = ${userId}`;
 }
 
-/** Deletes the student and their submission file records; returns the removed files. */
-export async function deleteStudentCascade(studentId: number) {
+/**
+ * Deletes the account with everything that cascades from it. Refuses (returns null) while the
+ * user still owns classes; the row lock stops a class from being created concurrently.
+ * Returns the file records whose blobs must be removed from Storage.
+ */
+export async function deleteUserCascade(userId: number) {
   return sql.begin(async (tx) => {
+    await tx`SELECT id FROM users WHERE id = ${userId} FOR UPDATE`;
+    const [{ n }] = await tx<{ n: number }[]>`
+      SELECT count(*)::int AS n FROM classes WHERE professor_id = ${userId}`;
+    if (n > 0) return null;
     const files = await tx<FileRecord[]>`
       DELETE FROM files
       WHERE owner_type = 'submission'
-        AND owner_id IN (SELECT id FROM submissions WHERE student_id = ${studentId})
+        AND owner_id IN (SELECT s.id FROM submissions s WHERE s.student_id = ${userId})
       RETURNING *`;
-    await tx`DELETE FROM users WHERE id = ${studentId} AND role = 'student'`;
+    await tx`DELETE FROM users WHERE id = ${userId}`;
     return [...files];
   });
 }
 
-// Assignments
+// Classes
 
-export function listAssignments() {
-  return sql<Assignment[]>`SELECT * FROM assignments ORDER BY due_at DESC`;
+const JOIN_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+
+function generateJoinCode() {
+  return Array.from({ length: 8 }, () => JOIN_CODE_ALPHABET[randomInt(JOIN_CODE_ALPHABET.length)]).join("");
 }
 
-export function listAssignmentsForStudent(studentId: number) {
+/** Accepts codes typed with dashes, spaces or lowercase. */
+export function normalizeJoinCode(input: string) {
+  return input.toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+export function formatJoinCode(code: string) {
+  return `${code.slice(0, 4)}-${code.slice(4)}`;
+}
+
+function isUniqueViolation(error: unknown) {
+  return typeof error === "object" && error !== null && "code" in error && error.code === "23505";
+}
+
+async function withFreshJoinCode<T>(write: (code: string) => Promise<T>): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await write(generateJoinCode());
+    } catch (error) {
+      if (!isUniqueViolation(error) || attempt >= 4) throw error;
+    }
+  }
+}
+
+const classColumns = () => sql`
+  c.id, c.professor_id, u.name AS professor_name, c.name, c.term, c.description, c.join_code, c.created_at`;
+
+export async function getClass(id: number) {
+  const [cls] = await sql<ClassDetail[]>`
+    SELECT ${classColumns()} FROM classes c JOIN users u ON u.id = c.professor_id WHERE c.id = ${id}`;
+  return cls;
+}
+
+export async function findClassByJoinCode(code: string) {
+  const [cls] = await sql<ClassDetail[]>`
+    SELECT ${classColumns()} FROM classes c JOIN users u ON u.id = c.professor_id
+    WHERE c.join_code = ${code}`;
+  return cls;
+}
+
+export function listClassesForProfessor(professorId: number) {
+  return sql<ProfessorClassCard[]>`
+    SELECT ${classColumns()},
+      (SELECT count(*)::int FROM enrollments e WHERE e.class_id = c.id AND e.status = 'approved') AS approved_count,
+      (SELECT count(*)::int FROM enrollments e WHERE e.class_id = c.id AND e.status = 'pending') AS pending_count
+    FROM classes c JOIN users u ON u.id = c.professor_id
+    WHERE c.professor_id = ${professorId}
+    ORDER BY c.created_at DESC`;
+}
+
+export function listClassesForStudent(studentId: number) {
+  return sql<StudentClassCard[]>`
+    SELECT c.id, c.name, c.term, c.description, u.name AS professor_name,
+      (SELECT count(*)::int FROM enrollments e WHERE e.class_id = c.id AND e.status = 'approved') AS approved_count,
+      mine.status AS my_status
+    FROM classes c
+    JOIN users u ON u.id = c.professor_id
+    LEFT JOIN enrollments mine ON mine.class_id = c.id AND mine.student_id = ${studentId}
+    ORDER BY c.created_at DESC`;
+}
+
+export async function createClass(input: {
+  professorId: number;
+  name: string;
+  term: string;
+  description: string;
+}) {
+  return withFreshJoinCode(async (code) => {
+    const [row] = await sql<{ id: number }[]>`
+      INSERT INTO classes (professor_id, name, term, description, join_code)
+      VALUES (${input.professorId}, ${input.name}, ${input.term}, ${input.description}, ${code})
+      RETURNING id`;
+    return row.id;
+  });
+}
+
+export async function updateClass(id: number, input: { name: string; term: string; description: string }) {
+  await sql`
+    UPDATE classes SET name = ${input.name}, term = ${input.term}, description = ${input.description}
+    WHERE id = ${id}`;
+}
+
+export async function regenerateJoinCode(id: number) {
+  await withFreshJoinCode((code) => sql`UPDATE classes SET join_code = ${code} WHERE id = ${id}`);
+}
+
+/** Deletes the class with everything in it; returns the file records whose blobs must be removed. */
+export async function deleteClassCascade(id: number) {
+  return sql.begin(async (tx) => {
+    const files = await tx<FileRecord[]>`
+      DELETE FROM files
+      WHERE (owner_type = 'assignment'
+             AND owner_id IN (SELECT a.id FROM assignments a WHERE a.class_id = ${id}))
+         OR (owner_type = 'submission'
+             AND owner_id IN (SELECT s.id FROM submissions s
+                              JOIN assignments a ON a.id = s.assignment_id
+                              WHERE a.class_id = ${id}))
+      RETURNING *`;
+    await tx`DELETE FROM classes WHERE id = ${id}`;
+    return [...files];
+  });
+}
+
+// Enrollments
+
+export async function getEnrollment(classId: number, studentId: number) {
+  const [enrollment] = await sql<Enrollment[]>`
+    SELECT * FROM enrollments WHERE class_id = ${classId} AND student_id = ${studentId}`;
+  return enrollment;
+}
+
+/** Creates a pending request; never overrides an existing enrollment (including a rejection). */
+export async function requestEnrollment(classId: number, studentId: number) {
+  await sql`
+    INSERT INTO enrollments (class_id, student_id, status, joined_via)
+    VALUES (${classId}, ${studentId}, 'pending', 'request')
+    ON CONFLICT DO NOTHING`;
+}
+
+export async function joinWithCode(classId: number, studentId: number) {
+  await sql`
+    INSERT INTO enrollments (class_id, student_id, status, joined_via, decided_at)
+    VALUES (${classId}, ${studentId}, 'approved', 'code', now())
+    ON CONFLICT (class_id, student_id) DO UPDATE
+    SET status = 'approved', joined_via = 'code', decided_at = now()
+    WHERE enrollments.status <> 'approved'`;
+}
+
+export async function setEnrollmentStatus(classId: number, studentId: number, status: EnrollmentStatus) {
+  await sql`
+    UPDATE enrollments SET status = ${status}, decided_at = now()
+    WHERE class_id = ${classId} AND student_id = ${studentId}`;
+}
+
+export function listMembers(classId: number) {
+  return sql<Member[]>`
+    SELECT u.id, u.name, u.email, u.role, u.project_title,
+           e.status, e.joined_via, e.requested_at, e.decided_at
+    FROM enrollments e JOIN users u ON u.id = e.student_id
+    WHERE e.class_id = ${classId}
+    ORDER BY u.name`;
+}
+
+export function listApprovedStudents(classId: number) {
+  return sql<User[]>`
+    SELECT u.id, u.name, u.email, u.role, u.project_title
+    FROM enrollments e JOIN users u ON u.id = e.student_id
+    WHERE e.class_id = ${classId} AND e.status = 'approved'
+    ORDER BY u.name`;
+}
+
+export async function countRecentCodeFailures(studentId: number, withinMinutes: number) {
+  const [row] = await sql<{ n: number }[]>`
+    SELECT count(*)::int AS n FROM join_code_failures
+    WHERE student_id = ${studentId}
+      AND attempted_at > now() - make_interval(mins => ${withinMinutes})`;
+  return row.n;
+}
+
+export async function recordCodeFailure(studentId: number) {
+  await sql`INSERT INTO join_code_failures (student_id) VALUES (${studentId})`;
+}
+
+// Assignments
+
+export function listAssignments(classId: number) {
+  return sql<Assignment[]>`SELECT * FROM assignments WHERE class_id = ${classId} ORDER BY due_at DESC`;
+}
+
+export function listAssignmentsForStudent(classId: number, studentId: number) {
   return sql<Assignment[]>`
     SELECT a.* FROM assignments a
-    WHERE NOT EXISTS (SELECT 1 FROM assignment_targets t WHERE t.assignment_id = a.id)
-       OR EXISTS (SELECT 1 FROM assignment_targets t WHERE t.assignment_id = a.id AND t.student_id = ${studentId})
+    WHERE a.class_id = ${classId}
+      AND (NOT EXISTS (SELECT 1 FROM assignment_targets t WHERE t.assignment_id = a.id)
+           OR EXISTS (SELECT 1 FROM assignment_targets t
+                      WHERE t.assignment_id = a.id AND t.student_id = ${studentId}))
     ORDER BY a.due_at DESC`;
 }
 
@@ -171,15 +365,24 @@ export async function getAssignmentTargetIds(assignmentId: number): Promise<numb
   return rows.map((row) => row.student_id);
 }
 
+/** True when the student is approved in the assignment's class and is one of its targets. */
 export async function isAssignedTo(assignmentId: number, studentId: number) {
-  const targets = await getAssignmentTargetIds(assignmentId);
-  return targets.length === 0 || targets.includes(studentId);
+  const [row] = await sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM assignments a
+      JOIN enrollments e ON e.class_id = a.class_id AND e.student_id = ${studentId} AND e.status = 'approved'
+      WHERE a.id = ${assignmentId}
+        AND (NOT EXISTS (SELECT 1 FROM assignment_targets t WHERE t.assignment_id = a.id)
+             OR EXISTS (SELECT 1 FROM assignment_targets t
+                        WHERE t.assignment_id = a.id AND t.student_id = ${studentId}))
+    ) AS ok`;
+  return row.ok;
 }
 
-export async function listStudentsForAssignment(assignmentId: number) {
+export async function listStudentsForAssignment(assignment: Assignment) {
   const [targets, students] = await Promise.all([
-    getAssignmentTargetIds(assignmentId),
-    listStudents(),
+    getAssignmentTargetIds(assignment.id),
+    listApprovedStudents(assignment.class_id),
   ]);
   return targets.length === 0 ? [...students] : students.filter((s) => targets.includes(s.id));
 }
@@ -187,14 +390,14 @@ export async function listStudentsForAssignment(assignmentId: number) {
 type AssignmentInput = { title: string; description: string; dueAt: string };
 
 export async function createAssignmentWithTargets(
-  input: AssignmentInput & { createdBy: number },
+  input: AssignmentInput & { classId: number; createdBy: number },
   studentIds: number[],
   files: NewFile[],
 ) {
   return sql.begin(async (tx) => {
     const [{ id }] = await tx<{ id: number }[]>`
-      INSERT INTO assignments (title, description, due_at, created_by)
-      VALUES (${input.title}, ${input.description}, ${input.dueAt}, ${input.createdBy})
+      INSERT INTO assignments (class_id, title, description, due_at, created_by)
+      VALUES (${input.classId}, ${input.title}, ${input.description}, ${input.dueAt}, ${input.createdBy})
       RETURNING id`;
     for (const studentId of studentIds) {
       await tx`INSERT INTO assignment_targets (assignment_id, student_id) VALUES (${id}, ${studentId})`;
@@ -338,7 +541,7 @@ export async function setReview(assignmentId: number, studentId: number, status:
     DO UPDATE SET status = excluded.status, updated_at = now()`;
 }
 
-/** Everything needed to compute one student's status on one assignment, in a single query. */
+/** Everything needed to compute one student's status on one assignment. */
 export async function getProgressRow(assignmentId: number, studentId: number) {
   const [row] = await sql<
     {
@@ -369,17 +572,20 @@ export async function getProgressRow(assignmentId: number, studentId: number) {
 
 // Announcements
 
-export function listAnnouncements(limit = 50) {
+export function listAnnouncements(classId: number, limit = 50) {
   return sql<Announcement[]>`
     SELECT a.id, a.title, a.body, u.name AS author_name, a.created_at
     FROM announcements a JOIN users u ON u.id = a.author_id
+    WHERE a.class_id = ${classId}
     ORDER BY a.created_at DESC LIMIT ${limit}`;
 }
 
-export async function createAnnouncement(title: string, body: string, authorId: number) {
-  await sql`INSERT INTO announcements (title, body, author_id) VALUES (${title}, ${body}, ${authorId})`;
+export async function createAnnouncement(classId: number, title: string, body: string, authorId: number) {
+  await sql`
+    INSERT INTO announcements (class_id, title, body, author_id)
+    VALUES (${classId}, ${title}, ${body}, ${authorId})`;
 }
 
-export async function deleteAnnouncement(id: number) {
-  await sql`DELETE FROM announcements WHERE id = ${id}`;
+export async function deleteAnnouncement(classId: number, id: number) {
+  await sql`DELETE FROM announcements WHERE id = ${id} AND class_id = ${classId}`;
 }

@@ -1,12 +1,10 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
-import { requireStudent, requireUser } from "@/lib/auth";
+import { getAssignmentAccess } from "@/lib/access";
 import {
   addComment,
   createSubmission,
-  findUserById,
-  getAssignment,
   isAssignedTo,
   markViewed,
   setReview,
@@ -20,10 +18,9 @@ export async function submitWork(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
-  const student = await requireStudent();
-  if (!(await getAssignment(assignmentId)) || !(await isAssignedTo(assignmentId, student.id))) {
-    return { error: "제출할 수 없는 과제입니다." };
-  }
+  const access = await getAssignmentAccess(assignmentId);
+  if (!access || access.isProfessor) return { error: "제출할 수 없는 과제입니다." };
+  const student = access.user;
 
   const content = text(formData, "content");
   const linkUrl = text(formData, "linkUrl") || null;
@@ -51,15 +48,11 @@ export async function postComment(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
-  const user = await requireUser();
-  if (user.role === "student" && user.id !== studentId) return { error: "권한이 없습니다." };
-
-  const [assignment, student, assigned] = await Promise.all([
-    getAssignment(assignmentId),
-    findUserById(studentId),
-    isAssignedTo(assignmentId, studentId),
-  ]);
-  if (!assignment || !student || student.role !== "student" || !assigned) {
+  const access = await getAssignmentAccess(assignmentId);
+  if (!access) return { error: "대상을 찾을 수 없습니다." };
+  const { user } = access;
+  if (!access.isProfessor && user.id !== studentId) return { error: "권한이 없습니다." };
+  if (access.isProfessor && !(await isAssignedTo(assignmentId, studentId))) {
     return { error: "대상을 찾을 수 없습니다." };
   }
 
@@ -68,7 +61,7 @@ export async function postComment(
   if (!body && !review) return { error: "내용을 입력해 주세요." };
 
   if (body) await addComment({ assignmentId, studentId, authorId: user.id, body });
-  if (user.role === "professor" && (review === "approved" || review === "revision_requested")) {
+  if (access.isProfessor && (review === "approved" || review === "revision_requested")) {
     await setReview(assignmentId, studentId, review satisfies ReviewStatus);
   }
   revalidatePath("/", "layout");
@@ -76,8 +69,6 @@ export async function postComment(
 }
 
 export async function markViewedAction(assignmentId: number) {
-  const student = await requireStudent();
-  if ((await getAssignment(assignmentId)) && (await isAssignedTo(assignmentId, student.id))) {
-    await markViewed(assignmentId, student.id);
-  }
+  const access = await getAssignmentAccess(assignmentId);
+  if (access && !access.isProfessor) await markViewed(assignmentId, access.user.id);
 }

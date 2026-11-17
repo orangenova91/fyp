@@ -19,3 +19,5 @@ export function isHttpUrl(value: string) {
 }
 
 export const MIN_PASSWORD_LENGTH = 8;
+
+export const DELETE_ACCOUNT_PHRASE = "계정 삭제";

@@ -4,12 +4,20 @@ import { useTransition, type ReactNode } from "react";
 
 type Props = {
   action: () => Promise<void>;
-  confirmMessage: string;
+  /** Asks before running the action when set. */
+  confirmMessage?: string;
   children: ReactNode;
   className?: string;
+  pendingLabel?: ReactNode;
 };
 
-export function ConfirmButton({ action, confirmMessage, children, className = "btn-danger" }: Props) {
+export function ConfirmButton({
+  action,
+  confirmMessage,
+  children,
+  className = "btn-danger",
+  pendingLabel,
+}: Props) {
   const [pending, startTransition] = useTransition();
   return (
     <button
@@ -17,10 +25,10 @@ export function ConfirmButton({ action, confirmMessage, children, className = "b
       className={className}
       disabled={pending}
       onClick={() => {
-        if (window.confirm(confirmMessage)) startTransition(() => action());
+        if (!confirmMessage || window.confirm(confirmMessage)) startTransition(() => action());
       }}
     >
-      {children}
+      {pending && pendingLabel ? pendingLabel : children}
     </button>
   );
 }

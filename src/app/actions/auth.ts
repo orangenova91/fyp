@@ -4,7 +4,7 @@ import bcrypt from "bcryptjs";
 import { redirect } from "next/navigation";
 import { requireUser } from "@/lib/auth";
 import {
-  createFirstProfessor,
+  createUser,
   findUserWithPasswordByEmail,
   getPasswordHash,
   updatePasswordHash,
@@ -20,7 +20,7 @@ export async function login(_prev: FormState, formData: FormData): Promise<FormS
     return { error: "이메일 또는 비밀번호가 올바르지 않습니다." };
   }
   await createSession(user.id);
-  redirect("/dashboard");
+  redirect("/classes");
 }
 
 export async function logout() {
@@ -28,24 +28,30 @@ export async function logout() {
   redirect("/login");
 }
 
-export async function setupProfessor(_prev: FormState, formData: FormData): Promise<FormState> {
+export async function signup(_prev: FormState, formData: FormData): Promise<FormState> {
+  const role = text(formData, "role");
   const name = text(formData, "name");
   const email = text(formData, "email");
   const password = text(formData, "password");
+  const confirm = text(formData, "confirm");
+  if (role !== "professor" && role !== "student") return { error: "가입 유형을 선택해 주세요." };
   if (!name) return { error: "이름을 입력해 주세요." };
   if (!isEmail(email)) return { error: "올바른 이메일을 입력해 주세요." };
   if (password.length < MIN_PASSWORD_LENGTH) {
     return { error: `비밀번호는 ${MIN_PASSWORD_LENGTH}자 이상이어야 합니다.` };
   }
+  if (password !== confirm) return { error: "비밀번호 확인이 일치하지 않습니다." };
 
-  const id = await createFirstProfessor({
+  const id = await createUser({
     name,
     email,
+    role,
     passwordHash: await bcrypt.hash(password, 10),
+    projectTitle: role === "student" ? text(formData, "projectTitle") || null : null,
   });
-  if (id === null) redirect("/login");
+  if (id === null) return { error: "이미 가입된 이메일입니다." };
   await createSession(id);
-  redirect("/dashboard");
+  redirect("/classes");
 }
 
 export async function changePassword(_prev: FormState, formData: FormData): Promise<FormState> {

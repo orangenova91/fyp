@@ -11,13 +11,11 @@ export default async function AppLayout({ children }: LayoutProps<"/">) {
     <>
       <header className="border-b border-slate-200 bg-white">
         <div className="mx-auto flex max-w-5xl flex-wrap items-center gap-2 px-4 py-3">
-          <Link href="/dashboard" className="mr-4 font-bold text-indigo-600">
+          <Link href="/classes" className="mr-4 font-bold text-indigo-600">
             Capstone Hub
           </Link>
           <nav className="flex flex-wrap gap-1">
-            <NavLink href="/dashboard">대시보드</NavLink>
-            <NavLink href="/announcements">공지사항</NavLink>
-            {isProfessor && <NavLink href="/students">학생 관리</NavLink>}
+            <NavLink href="/classes">내 수업</NavLink>
             <NavLink href="/account">내 계정</NavLink>
           </nav>
           <div className="ml-auto flex items-center gap-3 text-sm">

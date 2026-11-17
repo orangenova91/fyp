@@ -1,5 +1,4 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { deleteAssignmentAction } from "@/app/actions/assignments";
 import { markViewedAction, submitWork } from "@/app/actions/submissions";
 import { ConfirmButton } from "@/components/confirm-button";
@@ -9,12 +8,10 @@ import { MarkViewed } from "@/components/mark-viewed";
 import { StatefulForm } from "@/components/stateful-form";
 import { DueBadge, StatusBadge } from "@/components/status-badge";
 import { SubmissionHistory } from "@/components/submission-history";
-import { requireUser } from "@/lib/auth";
+import { parseId, requireAssignmentAccess } from "@/lib/access";
 import {
-  getAssignment,
-  isAssignedTo,
+  listApprovedStudents,
   listFiles,
-  listStudents,
   listStudentsForAssignment,
   listSubmissions,
   type Assignment,
@@ -23,11 +20,15 @@ import {
 import { dDay, formatDateTime } from "@/lib/format";
 import { getProgress } from "@/lib/progress";
 
-export default async function AssignmentPage({ params }: PageProps<"/assignments/[id]">) {
-  const user = await requireUser();
-  const assignment = await getAssignment(Number((await params).id));
-  if (!assignment) notFound();
-  if (user.role === "student" && !(await isAssignedTo(assignment.id, user.id))) notFound();
+export default async function AssignmentPage({
+  params,
+}: PageProps<"/classes/[classId]/assignments/[assignmentId]">) {
+  const { classId, assignmentId } = await params;
+  const { user, assignment, isProfessor } = await requireAssignmentAccess(
+    parseId(classId),
+    parseId(assignmentId),
+  );
+  const base = `/classes/${assignment.class_id}`;
 
   const now = new Date();
   const files = await listFiles("assignment", assignment.id);
@@ -35,8 +36,8 @@ export default async function AssignmentPage({ params }: PageProps<"/assignments
 
   return (
     <div className="space-y-6">
-      <Link href="/dashboard" className="text-sm text-slate-500 hover:underline">
-        ← 대시보드
+      <Link href={`${base}/assignments`} className="text-sm text-slate-500 hover:underline">
+        ← 과제
       </Link>
 
       <article className="card">
@@ -48,9 +49,9 @@ export default async function AssignmentPage({ params }: PageProps<"/assignments
               마감 {formatDateTime(assignment.due_at)}
             </p>
           </div>
-          {user.role === "professor" && (
+          {isProfessor && (
             <div className="flex gap-2">
-              <Link href={`/assignments/${assignment.id}/edit`} className="btn-secondary">
+              <Link href={`${base}/assignments/${assignment.id}/edit`} className="btn-secondary">
                 수정
               </Link>
               <ConfirmButton
@@ -74,7 +75,7 @@ export default async function AssignmentPage({ params }: PageProps<"/assignments
         </div>
       </article>
 
-      {user.role === "professor" ? (
+      {isProfessor ? (
         <ProfessorSubmissionTable assignment={assignment} now={now} />
       ) : (
         <StudentWorkspace assignment={assignment} student={user} now={now} />
@@ -85,8 +86,8 @@ export default async function AssignmentPage({ params }: PageProps<"/assignments
 
 async function ProfessorSubmissionTable({ assignment, now }: { assignment: Assignment; now: Date }) {
   const [students, allStudents] = await Promise.all([
-    listStudentsForAssignment(assignment.id),
-    listStudents(),
+    listStudentsForAssignment(assignment),
+    listApprovedStudents(assignment.class_id),
   ]);
   const everyone = students.length === allStudents.length;
   const progresses = await Promise.all(students.map((s) => getProgress(assignment, s.id, now)));
@@ -134,7 +135,7 @@ async function ProfessorSubmissionTable({ assignment, now }: { assignment: Assig
                     <td className="px-4 py-3 text-slate-600">{progress.commentCount}</td>
                     <td className="px-4 py-3 text-right">
                       <Link
-                        href={`/assignments/${assignment.id}/students/${student.id}`}
+                        href={`/classes/${assignment.class_id}/assignments/${assignment.id}/students/${student.id}`}
                         className="btn-secondary py-1"
                       >
                         {progress.status === "submitted" ? "검토하기" : "보기"}

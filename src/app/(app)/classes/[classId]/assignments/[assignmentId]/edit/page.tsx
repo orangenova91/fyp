@@ -7,26 +7,28 @@ import {
 import { AssignmentForm } from "@/components/assignment-form";
 import { ConfirmButton } from "@/components/confirm-button";
 import { FileList } from "@/components/file-list";
-import { requireProfessor } from "@/lib/auth";
-import { getAssignment, getAssignmentTargetIds, listFiles, listStudents } from "@/lib/data";
+import { parseId, requireAssignmentAccess } from "@/lib/access";
+import { getAssignmentTargetIds, listApprovedStudents, listFiles } from "@/lib/data";
 
-export default async function EditAssignmentPage({ params }: PageProps<"/assignments/[id]/edit">) {
-  await requireProfessor();
-  const id = Number((await params).id);
-  const [assignment, files, students, targetIds] = await Promise.all([
-    getAssignment(id),
+export default async function EditAssignmentPage({
+  params,
+}: PageProps<"/classes/[classId]/assignments/[assignmentId]/edit">) {
+  const { classId, assignmentId } = await params;
+  const { assignment, isProfessor } = await requireAssignmentAccess(parseId(classId), parseId(assignmentId));
+  if (!isProfessor) notFound();
+  const id = assignment.id;
+  const [files, students, targetIds] = await Promise.all([
     listFiles("assignment", id),
-    listStudents(),
+    listApprovedStudents(assignment.class_id),
     getAssignmentTargetIds(id),
   ]);
-  if (!assignment) notFound();
 
   return (
     <div className="space-y-4">
-      <Link href={`/assignments/${id}`} className="text-sm text-slate-500 hover:underline">
+      <Link href={`/classes/${assignment.class_id}/assignments/${id}`} className="text-sm text-slate-500 hover:underline">
         ← 과제로 돌아가기
       </Link>
-      <h1 className="text-2xl font-bold">과제 수정</h1>
+      <h2 className="text-xl font-bold">과제 수정</h2>
 
       {files.length > 0 && (
         <section className="card">

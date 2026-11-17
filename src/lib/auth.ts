@@ -18,12 +18,12 @@ export async function requireUser(): Promise<User> {
 
 export async function requireProfessor(): Promise<User> {
   const user = await requireUser();
-  if (user.role !== "professor") redirect("/dashboard");
+  if (user.role !== "professor") redirect("/classes");
   return user;
 }
 
 export async function requireStudent(): Promise<User> {
   const user = await requireUser();
-  if (user.role !== "student") redirect("/dashboard");
+  if (user.role !== "student") redirect("/classes");
   return user;
 }

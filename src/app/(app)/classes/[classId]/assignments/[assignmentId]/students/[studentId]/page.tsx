@@ -3,22 +3,19 @@ import { notFound } from "next/navigation";
 import { FeedbackThread } from "@/components/feedback-thread";
 import { StatusBadge } from "@/components/status-badge";
 import { SubmissionHistory } from "@/components/submission-history";
-import { requireProfessor } from "@/lib/auth";
-import { findUserById, getAssignment, isAssignedTo, listSubmissions } from "@/lib/data";
+import { parseId, requireAssignmentAccess } from "@/lib/access";
+import { findUserById, isAssignedTo, listSubmissions } from "@/lib/data";
 import { formatDateTime } from "@/lib/format";
 import { getProgress } from "@/lib/progress";
 
 export default async function StudentSubmissionPage({
   params,
-}: PageProps<"/assignments/[id]/students/[studentId]">) {
-  await requireProfessor();
-  const { id, studentId } = await params;
-  const [assignment, student] = await Promise.all([
-    getAssignment(Number(id)),
-    findUserById(Number(studentId)),
-  ]);
-  if (!assignment || !student || student.role !== "student") notFound();
-  if (!(await isAssignedTo(assignment.id, student.id))) notFound();
+}: PageProps<"/classes/[classId]/assignments/[assignmentId]/students/[studentId]">) {
+  const { classId, assignmentId, studentId } = await params;
+  const { assignment, isProfessor } = await requireAssignmentAccess(parseId(classId), parseId(assignmentId));
+  if (!isProfessor) notFound();
+  const student = await findUserById(parseId(studentId));
+  if (!student || !(await isAssignedTo(assignment.id, student.id))) notFound();
 
   const [progress, submissions] = await Promise.all([
     getProgress(assignment, student.id),
@@ -27,7 +24,7 @@ export default async function StudentSubmissionPage({
 
   return (
     <div className="space-y-6">
-      <Link href={`/assignments/${assignment.id}`} className="text-sm text-slate-500 hover:underline">
+      <Link href={`/classes/${assignment.class_id}/assignments/${assignment.id}`} className="text-sm text-slate-500 hover:underline">
         ← {assignment.title}
       </Link>
 

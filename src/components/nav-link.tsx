@@ -3,9 +3,35 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-export function NavLink({ href, children }: { href: string; children: string }) {
+export function NavLink({
+  href,
+  children,
+  exact = false,
+  variant = "pill",
+}: {
+  href: string;
+  children: string;
+  exact?: boolean;
+  variant?: "pill" | "tab";
+}) {
   const pathname = usePathname();
-  const active = pathname === href || pathname.startsWith(`${href}/`);
+  const active = pathname === href || (!exact && pathname.startsWith(`${href}/`));
+
+  if (variant === "tab") {
+    return (
+      <Link
+        href={href}
+        className={`-mb-px border-b-2 px-3 py-2.5 text-sm font-medium ${
+          active
+            ? "border-indigo-600 text-indigo-700"
+            : "border-transparent text-slate-600 hover:border-slate-300 hover:text-slate-900"
+        }`}
+      >
+        {children}
+      </Link>
+    );
+  }
+
   return (
     <Link
       href={href}

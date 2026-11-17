@@ -2,26 +2,31 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { requireProfessor } from "@/lib/auth";
+import { getAssignmentAccess, getClassAccess } from "@/lib/access";
 import {
   createAssignmentWithTargets,
   deleteAssignmentCascade,
   deleteFileRecord,
-  getAssignment,
   getFile,
-  listStudents,
+  listApprovedStudents,
   updateAssignmentWithTargets,
 } from "@/lib/data";
 import { pickUploads, removeStoredFiles, uploadFiles, uploadsTooLarge, withUploads } from "@/lib/files";
 import { text, type FormState } from "@/lib/forms";
 import { parseLocalDateTime } from "@/lib/format";
 
-async function readAssignmentForm(formData: FormData) {
+async function requireOwnedAssignment(assignmentId: number) {
+  const access = await getAssignmentAccess(assignmentId);
+  if (!access?.isProfessor) throw new Error("과제를 찾을 수 없습니다.");
+  return access;
+}
+
+async function readAssignmentForm(classId: number, formData: FormData) {
   const title = text(formData, "title");
   const description = text(formData, "description");
   const dueAt = parseLocalDateTime(text(formData, "dueAt"));
   const audience = text(formData, "audience");
-  const studentIds = new Set((await listStudents()).map((s) => s.id));
+  const studentIds = new Set((await listApprovedStudents(classId)).map((s) => s.id));
   const targets = formData
     .getAll("targets")
     .map(Number)
@@ -43,19 +48,25 @@ async function readAssignmentForm(formData: FormData) {
 }
 
 export async function createAssignmentAction(
+  classId: number,
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
-  const professor = await requireProfessor();
-  const parsed = await readAssignmentForm(formData);
+  const access = await getClassAccess(classId);
+  if (!access?.isProfessor) return { error: "수업을 찾을 수 없습니다." };
+  const parsed = await readAssignmentForm(classId, formData);
   if ("error" in parsed) return { error: parsed.error };
 
   const uploaded = await uploadFiles(parsed.files, "assignment");
   const id = await withUploads(uploaded, () =>
-    createAssignmentWithTargets({ ...parsed.values, createdBy: professor.id }, parsed.targets, uploaded),
+    createAssignmentWithTargets(
+      { ...parsed.values, classId, createdBy: access.user.id },
+      parsed.targets,
+      uploaded,
+    ),
   );
   revalidatePath("/", "layout");
-  redirect(`/assignments/${id}`);
+  redirect(`/classes/${classId}/assignments/${id}`);
 }
 
 export async function updateAssignmentAction(
@@ -63,9 +74,10 @@ export async function updateAssignmentAction(
   _prev: FormState,
   formData: FormData,
 ): Promise<FormState> {
-  await requireProfessor();
-  if (!(await getAssignment(assignmentId))) return { error: "과제를 찾을 수 없습니다." };
-  const parsed = await readAssignmentForm(formData);
+  const access = await getAssignmentAccess(assignmentId);
+  if (!access?.isProfessor) return { error: "과제를 찾을 수 없습니다." };
+  const classId = access.cls.id;
+  const parsed = await readAssignmentForm(classId, formData);
   if ("error" in parsed) return { error: parsed.error };
 
   const uploaded = await uploadFiles(parsed.files, "assignment");
@@ -73,18 +85,18 @@ export async function updateAssignmentAction(
     updateAssignmentWithTargets(assignmentId, parsed.values, parsed.targets, uploaded),
   );
   revalidatePath("/", "layout");
-  redirect(`/assignments/${assignmentId}`);
+  redirect(`/classes/${classId}/assignments/${assignmentId}`);
 }
 
 export async function deleteAssignmentAction(assignmentId: number) {
-  await requireProfessor();
+  const { cls } = await requireOwnedAssignment(assignmentId);
   await removeStoredFiles(await deleteAssignmentCascade(assignmentId));
   revalidatePath("/", "layout");
-  redirect("/dashboard");
+  redirect(`/classes/${cls.id}/assignments`);
 }
 
 export async function deleteAssignmentFileAction(assignmentId: number, fileId: number) {
-  await requireProfessor();
+  await requireOwnedAssignment(assignmentId);
   const file = await getFile(fileId);
   if (!file || file.owner_type !== "assignment" || file.owner_id !== assignmentId) return;
   await deleteFileRecord(fileId);

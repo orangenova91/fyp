@@ -10,6 +10,7 @@ type Props = {
   pendingLabel?: string;
   resetOnSuccess?: boolean;
   className?: string;
+  submitClassName?: string;
 };
 
 /**
@@ -23,6 +24,7 @@ export function StatefulForm({
   pendingLabel = "처리 중…",
   resetOnSuccess = false,
   className = "space-y-4",
+  submitClassName = "btn-primary",
 }: Props) {
   const formRef = useRef<HTMLFormElement>(null);
   const [state, formAction, pending] = useActionState(async (prev: FormState, data: FormData) => {
@@ -52,7 +54,7 @@ export function StatefulForm({
           {state.success}
         </p>
       )}
-      <button type="submit" className="btn-primary" disabled={pending}>
+      <button type="submit" className={submitClassName} disabled={pending}>
         {pending ? pendingLabel : submitLabel}
       </button>
     </form>
